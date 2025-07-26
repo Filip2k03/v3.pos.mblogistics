@@ -1,0 +1,23 @@
+mblogistics_pos_v3/
+├── assets/
+│   └── bg.jpg         <-- Placeholder for your logo/background image
+├── config.php         <-- Database credentials, app constants
+├── db_connect.php     <-- Establishes database connection
+├── mblogistics_pos.sql <-- SQL dump for creating tables
+├── index.php          <-- Main router / entry point
+├── login.php
+├── logout.php
+├── dashboard.php
+├── voucher_create.php
+├── voucher_list.php
+├── voucher_view.php
+├── voucher_print.php
+├── expenses.php
+├── customer_management.php
+├── staff_management.php
+├── status_bulk_update.php
+├── includes/
+│   └── functions.php  <-- Common helper functions
+└── templates/
+    ├── header.php     <-- HTML <head>, header, navigation, flash messages
+    └── footer.php     <-- HTML <footer>, closing </body>/</html> tags
