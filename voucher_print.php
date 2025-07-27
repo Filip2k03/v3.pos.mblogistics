@@ -5,8 +5,8 @@
 session_start(); // Start session to access user_id for authorization
 
 require_once 'config.php';
-require_once 'db_connect.php';
-require_once 'includes/functions.php'; // For flash_message, is_logged_in, is_admin, generate_qr_code_url
+require_once 'db_connect.php'; // This establishes the $connection variable
+require_once 'includes/functions.php'; // For flash_message, is_logged_in, is_admin, generate_qr_code_url, etc.
 
 // Access the global $connection variable
 global $connection;
@@ -30,7 +30,8 @@ $is_admin = is_admin();
 $voucher_data = null;
 $breakdown_items = [];
 $error_message = '';
-$qr_code_url = ''; // Changed from qr_code_image to qr_code_url
+$qr_code_url = '';
+$pod_details = null; // To store POD information if available
 
 // --- Fetch Current User's Region ID ---
 $user_region_id = null;
@@ -46,16 +47,19 @@ if ($stmt_user_region) {
 }
 
 try {
-    // Fetch voucher details without initial user restriction
+    // Fetch voucher details
     $query_voucher = "SELECT v.*,
                              r_origin.region_name AS origin_region,
                              r_origin.prefix AS origin_prefix,
                              r_dest.region_name AS destination_region,
-                             u.username AS created_by_username
+                             u.username AS created_by_username,
+                             c.consignment_code,
+                             c.name AS consignment_name
                       FROM vouchers v
                       JOIN regions r_origin ON v.region_id = r_origin.id
                       LEFT JOIN regions r_dest ON v.destination_region_id = r_dest.id
                       JOIN users u ON v.created_by_user_id = u.id
+                      LEFT JOIN consignments c ON v.consignment_id = c.id
                       WHERE v.id = ?";
 
     $stmt_voucher = mysqli_prepare($connection, $query_voucher);
@@ -70,7 +74,7 @@ try {
         if (!$voucher_data) {
             $error_message = 'Voucher not found.';
         } else {
-            // --- START MODIFIED PRINT PERMISSION LOGIC (MIRRORS voucher_view.php) ---
+            // --- START MODIFIED PRINT PERMISSION LOGIC ---
             $has_print_permission = false;
 
             if ($is_admin) {
@@ -116,10 +120,19 @@ try {
                     $voucher_data = null;
                 }
 
+                // Fetch POD details (NEW)
+                $stmt_pod = mysqli_prepare($connection, "SELECT image_path, signature_data, delivery_notes, delivery_timestamp FROM proof_of_delivery WHERE voucher_id = ?");
+                if ($stmt_pod) {
+                    mysqli_stmt_bind_param($stmt_pod, 'i', $voucher_id);
+                    mysqli_stmt_execute($stmt_pod);
+                    $result_pod = mysqli_stmt_get_result($stmt_pod);
+                    $pod_details = mysqli_fetch_assoc($result_pod);
+                    mysqli_stmt_close($stmt_pod);
+                }
+
                 // Generate QR Code URL for printing
-                $base_url = 'http://localhost/v3.pos.mblogistics/'; // IMPORTANT: Update this for production
-                $qr_code_data_url = $base_url . 'index.php?page=customer_view_voucher&code=' . urlencode($voucher_data['voucher_code']);
-                $qr_code_url = generate_qr_code_url($qr_code_data_url, 100); // Get QR code URL
+                $qr_code_data_url = BASE_URL . 'index.php?page=customer_view_voucher&code=' . urlencode($voucher_data['voucher_code']);
+                $qr_code_url = generate_qr_code_url($qr_code_data_url, 100);
             }
         }
     } else {
@@ -340,9 +353,9 @@ try {
             .footer-section {
                 border-top: 1px dashed #bfd0f3 !important;
             }
-            .qr-code-col { /* Adjust QR column for print */
+            .qr-code-col {
                 flex: 0 0 auto;
-                order: 1; /* Place it at the start visually in print header */
+                order: 1;
             }
             .voucher-header .info-col {
                 order: 2;
@@ -375,7 +388,7 @@ try {
                         <p><strong>Voucher Number: <?php echo htmlspecialchars($voucher_data['voucher_code']); ?></strong></p>
                         <p><strong>Date: <?php echo date('Y-m-d H:i:s', strtotime($voucher_data['created_at'])); ?> (GMT+6:30)</strong></p>
                     </div>
-                    <?php if (!empty($qr_code_url)): // Changed to qr_code_url ?>
+                    <?php if (!empty($qr_code_url)): ?>
                         <div class="qr-code-col text-center">
                             <img src="<?php echo $qr_code_url; ?>" alt="QR Code for Voucher <?php echo htmlspecialchars($voucher_data['voucher_code']); ?>" style="width: 100px; height: 100px; border: 1px solid #ccc; padding: 5px; border-radius: 5px;">
                             <p style="font-size: 0.7rem; margin-top: 5px;">Scan for details</p>
@@ -439,7 +452,7 @@ try {
                                 ?>
                                 <tr>
                                     <td><?php echo htmlspecialchars($item['item_type'] ?: 'N/A'); ?></td>
-                                    <td><?php echo htmlspecialchars($item['kg'] ?: 'N/A'); ?></td>
+                                    <td><?php echo htmlspecialchars(number_format((float)$item['kg'], 2)); ?></td>
                                     <td>
                                         <?php
                                             $currency = $voucher_data['currency'];

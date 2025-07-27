@@ -2,8 +2,7 @@
 // voucher_create.php
 
 // This file is loaded by index.php, so config.php, db_connect.php, and functions.php are already loaded.
-// Session start.
-// session_start();
+// Session is already started.
 
 if (!is_logged_in()) {
     flash_message('error', 'Please log in to create a voucher.');
@@ -15,10 +14,29 @@ global $connection;
 $user_id = $_SESSION['user_id'];
 $user_type = $_SESSION['user_type'];
 
-// Define options for dropdowns
-$payment_methods = ['Cash', 'Card', 'Kpay', 'Ayapay', 'Banking'];
+// Define currencies for the dropdown (still hardcoded here for now, can be dynamic later)
 $currencies = ['MMK', 'RM', 'BAT', 'SGD', 'BHAT'];
-$delivery_types = ['POS', 'Delivery', 'Take in office'];
+
+// Fetch master data dynamically (NEW)
+$payment_methods = get_master_data('payment_methods');
+$delivery_types = get_master_data('delivery_types');
+$item_types_options = get_master_data('item_types'); // Renamed to avoid conflict with $_POST['item_types']
+
+// Fetch active consignments for assignment dropdown
+$active_consignments = [];
+$stmt_consignments = mysqli_prepare($connection, "SELECT id, consignment_code, name, status FROM consignments WHERE status IN ('Pending', 'Departed', 'In Transit', 'Arrived at Hub') ORDER BY consignment_code DESC");
+if ($stmt_consignments) {
+    mysqli_stmt_execute($stmt_consignments);
+    $result_consignments = mysqli_stmt_get_result($stmt_consignments);
+    while ($row = mysqli_fetch_assoc($result_consignments)) {
+        $active_consignments[] = $row;
+    }
+    mysqli_free_result($result_consignments);
+    mysqli_stmt_close($stmt_consignments);
+} else {
+    flash_message('warning', 'Could not load active consignments for assignment.');
+}
+
 
 // --- Handle POST request (Form Submission) ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -39,9 +57,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $notes = trim($_POST['notes'] ?? '');
     $voucher_region_id = intval($_POST['voucher_region_id'] ?? 0); // Origin Region
     $destination_region_id = intval($_POST['destination_region_id'] ?? 0); // NEW: Destination Region
+    $consignment_id = intval($_POST['consignment_id'] ?? 0); // NEW: Selected Consignment ID
 
     // Item breakdown details (arrays from dynamic form fields)
-    $item_types = $_POST['item_type'] ?? [];
+    $item_types_submitted = $_POST['item_type'] ?? []; // Renamed to avoid conflict
     $item_kgs = $_POST['item_kg'] ?? [];
     $item_price_per_kgs = $_POST['item_price_per_kg'] ?? [];
 
@@ -59,15 +78,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (empty($delivery_type)) $errors[] = 'Delivery Type is required.';
     if ($voucher_region_id === $destination_region_id) $errors[] = 'Origin and Destination regions cannot be the same.';
 
+    // Validate fetched master data options
+    $valid_payment_methods = array_column($payment_methods, 'name');
+    if (!in_array($payment_method, $valid_payment_methods)) $errors[] = 'Invalid Payment Method selected.';
+    $valid_delivery_types = array_column($delivery_types, 'name');
+    if (!in_array($delivery_type, $valid_delivery_types)) $errors[] = 'Invalid Delivery Type selected.';
+    $valid_currencies = $currencies; // Currencies are still hardcoded for now, but could be fetched dynamically too
+    if (!in_array($currency, $valid_currencies)) $errors[] = 'Invalid Currency selected.';
+
 
     // Calculate total weight and total item price from breakdown
     $total_voucher_weight = 0;
     $total_items_calculated_price = 0;
     $has_valid_item = false;
+    $valid_item_types = array_column($item_types_options, 'name'); // Use fetched item types
 
-    foreach ($item_types as $key => $type) {
-        // Only process items that have an item type selected/entered
+    foreach ($item_types_submitted as $key => $type) {
         if (!empty(trim($type))) {
+            if (!in_array($type, $valid_item_types)) { // Validate submitted item type
+                $errors[] = "Invalid Item Type '{$type}' detected.";
+                continue; // Skip invalid item type
+            }
+
             $has_valid_item = true;
             $item_kg_val = !empty($item_kgs[$key]) ? floatval($item_kgs[$key]) : 0;
             $item_price_per_kg_val = !empty($item_price_per_kgs[$key]) ? floatval($item_price_per_kgs[$key]) : 0;
@@ -85,7 +117,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $errors[] = 'At least one item breakdown is required with an item type, kg, and price.';
     }
 
-    // Now check the overall calculated weight (should be > 0 if items are valid)
     if ($total_voucher_weight <= 0 && $has_valid_item) {
         $errors[] = 'Total weight from item breakdown must be greater than 0.';
     }
@@ -95,14 +126,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('index.php?page=voucher_create');
     }
 
-    // Calculate final total amount (items total + delivery charge)
     $total_amount = $total_items_calculated_price + $delivery_charge;
+    $initial_voucher_status = ($consignment_id > 0) ? 'In Transit' : 'Pending';
 
-    // Start transaction
+
     mysqli_begin_transaction($connection);
 
     try {
-        // 1. Fetch region details for voucher code generation
         $stmt_region = mysqli_prepare($connection, "SELECT prefix, current_sequence FROM regions WHERE id = ? FOR UPDATE");
         if (!$stmt_region) {
             throw new Exception("Failed to prepare region statement: " . mysqli_error($connection));
@@ -121,25 +151,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $new_sequence = $region_data['current_sequence'] + 1;
         $voucher_code = generate_voucher_code($region_data['prefix'], $new_sequence);
 
-        // 2. Insert into `vouchers` table
         $stmt_voucher = mysqli_prepare($connection,
             "INSERT INTO vouchers (voucher_code, sender_name, sender_phone, sender_address, use_sender_address_for_checkout,
-                                 receiver_name, receiver_phone, receiver_address, payment_method, weight_kg,
+                                 receiver_name, receiver_phone, receiver_address, customer_id, consignment_id, payment_method, weight_kg,
                                  price_per_kg_at_voucher, delivery_charge, total_amount, currency, delivery_type, notes,
-                                 region_id, destination_region_id, created_by_user_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                                 status, region_id, destination_region_id, created_by_user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         );
         if (!$stmt_voucher) {
             throw new Exception("Failed to prepare voucher insert statement: " . mysqli_error($connection));
         }
 
         $dummy_price_per_kg_at_voucher_column = 0.00;
-        mysqli_stmt_bind_param($stmt_voucher, 'ssssissssddssdssiii',
+        $customer_id_null = null;
+        $bind_consignment_id = ($consignment_id > 0) ? $consignment_id : null;
+
+        mysqli_stmt_bind_param($stmt_voucher, 'ssssissssiddssdssiii',
             $voucher_code, $sender_name, $sender_phone, $sender_address, $use_sender_address_for_checkout,
-            $receiver_name, $receiver_phone, $receiver_address, $payment_method, $total_voucher_weight,
+            $receiver_name, $receiver_phone, $receiver_address, $customer_id_null, $bind_consignment_id,
+            $payment_method, $total_voucher_weight,
             $dummy_price_per_kg_at_voucher_column,
             $delivery_charge, $total_amount, $currency, $delivery_type, $notes,
-            $voucher_region_id, $destination_region_id, $user_id
+            $initial_voucher_status, $voucher_region_id, $destination_region_id, $user_id
         );
 
         if (!mysqli_stmt_execute($stmt_voucher)) {
@@ -148,8 +181,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $voucher_id = mysqli_insert_id($connection);
         mysqli_stmt_close($stmt_voucher);
 
-        // 3. Insert into `voucher_breakdowns` table (loop through submitted items)
-        if (!empty($item_types)) {
+        if (!empty($item_types_submitted)) {
             $stmt_breakdown = mysqli_prepare($connection,
                 "INSERT INTO voucher_breakdowns (voucher_id, item_type, kg, price_per_kg)
                  VALUES (?, ?, ?, ?)"
@@ -158,7 +190,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 throw new Exception("Failed to prepare breakdown insert statement: " . mysqli_error($connection));
             }
 
-            foreach ($item_types as $key => $type) {
+            foreach ($item_types_submitted as $key => $type) {
                 if (!empty(trim($type))) {
                     $item_kg = !empty($item_kgs[$key]) ? floatval($item_kgs[$key]) : null;
                     $item_price_per_kg = !empty($item_price_per_kgs[$key]) ? floatval($item_price_per_kgs[$key]) : null;
@@ -174,7 +206,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             mysqli_stmt_close($stmt_breakdown);
         }
 
-        // 4. Update `current_sequence` in `regions` table (for origin region)
         $stmt_update_sequence = mysqli_prepare($connection, "UPDATE regions SET current_sequence = ? WHERE id = ?");
         if (!$stmt_update_sequence) {
             throw new Exception("Failed to prepare sequence update statement: " . mysqli_error($connection));
@@ -185,16 +216,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         mysqli_stmt_close($stmt_update_sequence);
 
-        // 5. Log initial voucher status (Pending)
-        log_voucher_status_change($voucher_id, null, 'Pending', 'Voucher created.', $user_id);
+        log_voucher_status_change($voucher_id, null, $initial_voucher_status, 'Voucher created' . ($consignment_id > 0 ? ' and assigned to consignment ' . $consignment_id : ''), $user_id);
 
 
-        mysqli_commit($connection); // Commit transaction
+        mysqli_commit($connection);
         flash_message('success', "Voucher '{$voucher_code}' created successfully!");
         redirect('index.php?page=voucher_view&id=' . $voucher_id);
 
     } catch (Exception $e) {
-        mysqli_rollback($connection); // Rollback on error
+        mysqli_rollback($connection);
         flash_message('error', 'Failed to create voucher: ' . $e->getMessage());
         redirect('index.php?page=voucher_create');
     }
@@ -307,6 +337,17 @@ include_template('header', ['page' => 'voucher_create']);
                     </select>
                 </div>
                 <div class="mb-4">
+                    <label for="consignment_id" class="block text-gray-700 text-sm font-semibold mb-2">Assign to Consignment (Optional):</label>
+                    <select id="consignment_id" name="consignment_id" class="form-select">
+                        <option value="0">Not Assigned</option>
+                        <?php foreach ($active_consignments as $cons): ?>
+                            <option value="<?php echo htmlspecialchars($cons['id']); ?>">
+                                <?php echo htmlspecialchars($cons['consignment_code']); ?> (<?php echo htmlspecialchars($cons['name'] ?: 'No Name'); ?>) - Status: <?php echo htmlspecialchars($cons['status']); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="mb-4">
                     <label for="delivery_charge" class="block text-gray-700 text-sm font-semibold mb-2">Delivery Charge:</label>
                     <input type="number" id="delivery_charge" name="delivery_charge" class="form-input" step="0.01" value="0.00" oninput="calculateTotal()">
                 </div>
@@ -315,7 +356,7 @@ include_template('header', ['page' => 'voucher_create']);
                     <select id="payment_method" name="payment_method" class="form-select" required>
                         <option value="">Select Payment Method</option>
                         <?php foreach ($payment_methods as $method): ?>
-                            <option value="<?php echo htmlspecialchars($method); ?>"><?php echo htmlspecialchars($method); ?></option>
+                            <option value="<?php echo htmlspecialchars($method['name']); ?>"><?php echo htmlspecialchars($method['name']); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -335,7 +376,7 @@ include_template('header', ['page' => 'voucher_create']);
                     <select id="delivery_type" name="delivery_type" class="form-select" required>
                         <option value="">Select Delivery Type</option>
                            <?php foreach ($delivery_types as $d_type): ?>
-                            <option value="<?php echo htmlspecialchars($d_type); ?>"><?php echo htmlspecialchars($d_type); ?></option>
+                            <option value="<?php echo htmlspecialchars($d_type['name']); ?>"><?php echo htmlspecialchars($d_type['name']); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -378,17 +419,11 @@ include_template('header', ['page' => 'voucher_create']);
         const itemBreakdownsContainer = document.getElementById('item_breakdowns_container');
         const addItemBtn = document.getElementById('add_item_btn');
 
-        // Item Type options for dynamic rows
-        const itemTypeOptions = [
-            { value: "အထည်", text: "အထည် (Clothes)" },
-            { value: "အစားအသောက်", text: "အစားအသောက် (Food)" },
-            { value: "အလှကုန်", text: "အလှကုန် (Cosmetics)" },
-            { value: "ဆေးဝါး", text: "ဆေးဝါး (Medicine)" },
-            { value: "လျှပ်စစ်ပစ္စည်း", text: "လျှပ်စစ်ပစ္စည်း (Electronics)" },
-            { value: "Fancy", text: "Fancy" },
-            { value: "Gold", text: "Gold" },
-            { value: "Document", text: "Document" }
-        ];
+        // Item Type options for dynamic rows (from PHP variable)
+        const itemTypeOptions = <?php echo json_encode($item_types_options); ?>.map(item => ({
+            value: item.name,
+            text: item.name
+        }));
 
         // Helper function to generate item type select HTML
         function generateItemTypeSelectHtml(selectedValue = '') {

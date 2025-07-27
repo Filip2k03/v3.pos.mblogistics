@@ -2,8 +2,7 @@
 // voucher_list.php
 
 // This file is loaded by index.php, so config.php, db_connect.php, and functions.php are already loaded.
-// Session start.
-// session_start();
+// Session is already started.
 
 if (!is_logged_in()) {
     flash_message('error', 'Please log in to view vouchers.');
@@ -43,6 +42,7 @@ $start_date = $_GET['start_date'] ?? '';
 $end_date = $_GET['end_date'] ?? '';
 $filter_origin_region_id = $_GET['origin_region_id'] ?? 'All'; // Filter by origin region
 $filter_destination_region_id = $_GET['destination_region_id'] ?? 'All'; // Filter by destination region
+$filter_consignment_id = $_GET['consignment_id'] ?? 'All'; // NEW: Filter by Consignment
 $filter_status = $_GET['status'] ?? 'All';
 $search_term = trim($_GET['search'] ?? '');
 $search_column = $_GET['search_column'] ?? 'voucher_code'; // Default search column
@@ -59,7 +59,19 @@ if ($stmt_regions) {
     }
     mysqli_free_result($stmt_regions);
 } else {
-    $errors[] = 'Error loading regions for filter: ' . mysqli_error($connection);
+    flash_message('error', 'Error loading regions: ' . mysqli_error($connection));
+}
+
+// Fetch consignments for filter dropdown (NEW)
+$consignments_for_filter = [];
+$stmt_consignments_filter = mysqli_query($connection, "SELECT id, consignment_code, name FROM consignments ORDER BY consignment_code DESC");
+if ($stmt_consignments_filter) {
+    while ($row = mysqli_fetch_assoc($stmt_consignments_filter)) {
+        $consignments_for_filter[] = $row;
+    }
+    mysqli_free_result($stmt_consignments_filter);
+} else {
+    flash_message('error', 'Error loading consignments for filter: ' . mysqli_error($connection));
 }
 
 
@@ -131,8 +143,6 @@ if (!empty($end_date)) {
 }
 
 // Region filters (applied on top of user-specific filter if present, or independently for admin)
-// These filters now apply AFTER the base user-type visibility is established.
-// If a non-admin, regional user is already being heavily filtered, these might act as secondary filters.
 if ($filter_origin_region_id !== 'All' && is_numeric($filter_origin_region_id)) {
     $where_clauses[] = "v.region_id = ?";
     $bind_params .= 'i';
@@ -144,6 +154,16 @@ if ($filter_destination_region_id !== 'All' && is_numeric($filter_destination_re
     $bind_params .= 'i';
     $bind_values[] = intval($filter_destination_region_id);
 }
+
+// Consignment Filter (NEW)
+if ($filter_consignment_id !== 'All' && is_numeric($filter_consignment_id)) {
+    $where_clauses[] = "v.consignment_id = ?";
+    $bind_params .= 'i';
+    $bind_values[] = intval($filter_consignment_id);
+} elseif ($filter_consignment_id === 'None') { // Allow filtering for vouchers not assigned to any consignment
+    $where_clauses[] = "v.consignment_id IS NULL";
+}
+
 
 // Search term filter
 if (!empty($search_term)) {
@@ -162,11 +182,14 @@ if (!empty($search_term)) {
 $query = "SELECT v.*,
                      r_origin.region_name AS origin_region_name,
                      r_dest.region_name AS destination_region_name,
-                     u.username AS created_by_username
+                     u.username AS created_by_username,
+                     c.consignment_code -- NEW: Consignment Code
             FROM vouchers v
             JOIN regions r_origin ON v.region_id = r_origin.id
             JOIN regions r_dest ON v.destination_region_id = r_dest.id
-            JOIN users u ON v.created_by_user_id = u.id";
+            JOIN users u ON v.created_by_user_id = u.id
+            LEFT JOIN consignments c ON v.consignment_id = c.id -- NEW: Join consignments
+            ";
 
 if (!empty($where_clauses)) {
     $query .= " WHERE " . implode(" AND ", $where_clauses);
@@ -187,7 +210,7 @@ if ($stmt) {
     mysqli_free_result($result);
     mysqli_stmt_close($stmt);
 } else {
-    $errors[] = 'Error fetching vouchers: ' . mysqli_error($connection);
+    flash_message('error', 'Error fetching vouchers: ' . mysqli_error($connection));
 }
 
 // Display any accumulated errors
@@ -236,6 +259,20 @@ include_template('header', ['page' => 'voucher_list']);
                 <?php endforeach; ?>
             </select>
         </div>
+
+        <div>
+            <label for="filter_consignment_id" class="block text-sm font-medium text-gray-700">Filter by Consignment:</label>
+            <select id="filter_consignment_id" name="consignment_id" class="form-select">
+                <option value="All">All Consignments</option>
+                <option value="None" <?php echo ($filter_consignment_id === 'None') ? 'selected' : ''; ?>>Not Assigned</option>
+                <?php foreach ($consignments_for_filter as $cons_option): ?>
+                    <option value="<?php echo htmlspecialchars($cons_option['id']); ?>" <?php echo (strval($filter_consignment_id) === strval($cons_option['id'])) ? 'selected' : ''; ?>>
+                        <?php echo htmlspecialchars($cons_option['consignment_code']); ?> (<?php echo htmlspecialchars($cons_option['name'] ?: 'No Name'); ?>)
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+
         <div>
             <label for="filter_status" class="block text-sm font-medium text-gray-700">Filter by Status:</label>
             <select id="filter_status" name="status" class="form-select">
@@ -287,7 +324,7 @@ include_template('header', ['page' => 'voucher_list']);
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Sender</th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Receiver</th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Route</th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Weight (kg)</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Consignment</th> <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Weight (kg)</th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Total Amount</th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                         <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created At</th>
@@ -303,9 +340,16 @@ include_template('header', ['page' => 'voucher_list']);
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
                                 <?php echo htmlspecialchars($voucher['origin_region_name'] . ' to ' . $voucher['destination_region_name']); ?>
                             </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700"> <?php if (!empty($voucher['consignment_code'])): ?>
+                                    <a href="index.php?page=consignment_view&id=<?php echo htmlspecialchars($voucher['consignment_id']); ?>" class="text-blue-600 hover:text-blue-800 font-medium">
+                                        <?php echo htmlspecialchars($voucher['consignment_code']); ?>
+                                    </a>
+                                <?php else: ?>
+                                    N/A
+                                <?php endif; ?>
+                            </td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
                                 <?php
-                                // Display blank if weight_kg is 0.00
                                 if ((float)$voucher['weight_kg'] === 0.00) {
                                     echo '';
                                 } else {
@@ -333,7 +377,7 @@ include_template('header', ['page' => 'voucher_list']);
                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                                 <?php
                                 $view_href = 'index.php?page=voucher_view&id=' . htmlspecialchars($voucher['id']);
-                                $view_class = 'btn btn-blue py-2 px-4 rounded-lg shadow-md'; // Using custom btn classes
+                                $view_class = 'btn btn-blue py-2 px-4 rounded-lg shadow-md';
                                 $view_onclick = '';
                                 $button_label = 'View';
 
@@ -341,23 +385,18 @@ include_template('header', ['page' => 'voucher_list']);
 
                                 $should_disable_view = false;
 
-                                // Admins can always view
                                 if ($is_admin) {
                                     $should_disable_view = false;
                                 } elseif ($is_myanmar_or_malay_user) {
                                     if ($voucher['status'] === 'Pending') {
-                                        // Pending vouchers: Only viewable if user's region is the origin region
                                         if ($user_region_id !== null && $user_region_id == $voucher['region_id']) {
                                             $should_disable_view = false;
                                         } else {
-                                            $should_disable_view = true; // Not the origin region for a pending voucher
+                                            $should_disable_view = true;
                                         }
                                     } elseif ($voucher['status'] === 'Delivered') {
-                                        // Delivered vouchers: Viewable by ALL Myanmar/Malay users
                                         $should_disable_view = false;
                                     } else {
-                                        // For 'In Transit', 'Cancelled', 'Returned' statuses,
-                                        // use the existing rule: viewable if user's region is either origin or destination
                                         if ($user_region_id !== null && ($user_region_id == $voucher['region_id'] || $user_region_id == $voucher['destination_region_id'])) {
                                             $should_disable_view = false;
                                         } else {
@@ -365,16 +404,14 @@ include_template('header', ['page' => 'voucher_list']);
                                         }
                                     }
                                 } else {
-                                    // Other non-admin user types (not Myanmar/Malay)
-                                    // Default to false, so they can view based on their general permissions
                                     $should_disable_view = false;
                                 }
 
                                 if ($should_disable_view) {
-                                    $view_href = '#'; // Prevent actual navigation
-                                    $view_class = 'bg-gray-300 text-gray-600 cursor-not-allowed font-semibold py-2 px-4 rounded-lg shadow-md'; // Disabled style
-                                    $view_onclick = 'event.preventDefault(); alert(\'You do not have permission to view this voucher.\');'; // User feedback
-                                    $button_label = 'No View'; // Change label to indicate disabled for visual clarity
+                                    $view_href = '#';
+                                    $view_class = 'bg-gray-300 text-gray-600 cursor-not-allowed font-semibold py-2 px-4 rounded-lg shadow-md';
+                                    $view_onclick = 'event.preventDefault(); alert(\'You do not have permission to view this voucher.\');';
+                                    $button_label = 'No View';
                                 }
                                 ?>
                                 <a href="<?php echo $view_href; ?>" class="<?php echo $view_class; ?>" <?php echo $view_onclick ? 'onclick="' . $view_onclick . '"' : ''; ?>>

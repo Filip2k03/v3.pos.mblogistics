@@ -9,6 +9,7 @@
         <p>&copy; <?php echo date('Y'); ?> <?php echo APP_NAME; ?>. All rights reserved.</p>
         <p class="text-sm mt-1">Developed by Payvia POS System</p>
     </footer>
+    
 
 </body>
 </html>
